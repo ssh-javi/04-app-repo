@@ -1,0 +1,105 @@
+name: DevSecOps Pipeline - Día 4
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  security-audit:
+    name: 🛡️ Audit & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Código Fuente
+        uses: actions/checkout@v4
+
+      # 🔍 FASE 1: SAST - Escaneo de código fuente buscando secretos y malas prácticas
+      - name: 🔐 Escaneo SAST y Secretos (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          exit-code: '1' # 🔥 Clave DevSecOps: Hace fallar el pipeline si encuentra riesgos Altos/Críticos
+          severity: 'CRITICAL,HIGH'
+
+  build-and-scan-image:
+    name: 📦 Build & Container Scan
+    needs: security-audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Código Fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Autenticar en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Compilamos la imagen localmente PERO NO LA PUSHEAMOS todavía (load: true)
+      - name: 🏗️ Compilar Imagen Local
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/go-devsecops-api:${{ github.sha }}
+
+      # 🔍 FASE 2: Escaneo del Contenedor (CVEs en las capas del Sistema Operativo)
+      - name: 🐳 Escanear Vulnerabilidades en la Imagen (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ secrets.DOCKERHUB_USERNAME }}/go-devsecops-api:${{ github.sha }}'
+          exit-code: '1' # 🔥 Frena el pipeline si la imagen base tiene bugs críticos
+          severity: 'CRITICAL,HIGH'
+          format: 'table'
+
+      # Si el escaneo anterior pasó con éxito, ahora sí hacemos el push real
+      - name: 🚀 Pushear Imagen Segura a Docker Hub
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/go-devsecops-api:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/go-devsecops-api:latest
+
+  gitops-update:
+    name: 🔄 GitOps Sync to Infra
+    needs: build-and-scan-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repositorio de Infraestructura
+        uses: actions/checkout@v4
+        with:
+          repository: 'ssh-javi/04-infra-repo' # 👈 Vinculado a tu nuevo repo de infra
+          token: ${{ secrets.GITOPS_GITHUB_TOKEN }}
+          ref: 'main'
+
+      # 🔍 FASE 3: Escaneo de Manifiestos de Kubernetes antes de impactar (Shift-Left completo)
+      - name: ⚙️ Analizar Manifiestos K8s (Trivy Config)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: './apps/go-api'
+          exit-code: '0' # Lo dejamos en 0 para advertencia (linter), o 1 si querés bloqueo duro
+          severity: 'CRITICAL,HIGH'
+
+      - name: Instalar YQ para Modificar Kustomize
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Actualizar Tag en Valores de Infraestructura
+        run: |
+          cd apps/go-api
+          yq eval '.images[0].newTag = "${{ github.sha }}"' -i kustomization.yaml
+
+      - name: Git Commit y Push (GitOps)
+        run: |
+          git config --global user.email "devsecops-bot@github.com"
+          git config --global user.name "GitHub DevSecOps Bot"
+          git add .
+          git commit -m "chore(security): pipeline aprobado - bump image tag to ${{ github.sha }} [skip ci]" || echo "No hay cambios"
+          git push origin main
