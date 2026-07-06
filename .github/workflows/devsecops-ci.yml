@@ -73,18 +73,20 @@ jobs:
       - name: Checkout Repositorio de Infraestructura
         uses: actions/checkout@v4
         with:
-          repository: 'ssh-javi/04-infra-repo' # 👈 Vinculado a tu nuevo repo de infra
+          repository: 'ssh-javi/04-infra-repo'
           token: ${{ secrets.GITOPS_GITHUB_TOKEN }}
           ref: 'main'
 
-      # 🔍 FASE 3: Escaneo de Manifiestos de Kubernetes antes de impactar (Shift-Left completo)
+      # 🔍 FASE 3: Analizar Manifiestos con la caché redirigida fuera de la carpeta Git
       - name: ⚙️ Analizar Manifiestos K8s (Trivy Config)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'config'
           scan-ref: './apps/go-api'
-          exit-code: '0' # Lo dejamos en 0 para advertencia (linter), o 1 si querés bloqueo duro
+          exit-code: '0'
           severity: 'CRITICAL,HIGH'
+          # 👇 REDIRIGIMOS LA CACHÉ AL RECTOR TEMPORAL DE UBUNTU OUTSIDE OF THE REPO
+          cache-dir: '/home/runner/.cache/trivy'
 
       - name: Instalar YQ para Modificar Kustomize
         run: |
@@ -96,10 +98,13 @@ jobs:
           cd apps/go-api
           yq eval '.images[0].newTag = "${{ github.sha }}"' -i kustomization.yaml
 
-      - name: Git Commit y Push (GitOps)
+      - name: Git Commit y Push (GitOps Seguro)
         run: |
           git config --global user.email "devsecops-bot@github.com"
           git config --global user.name "GitHub DevSecOps Bot"
-          git add .
+
+          # 👇 REEMPLAZO CRÍTICO: Solo tagueamos el archivo modificado, ignorando basura temporaria
+          git add apps/go-api/kustomization.yaml
+
           git commit -m "chore(security): pipeline aprobado - bump image tag to ${{ github.sha }} [skip ci]" || echo "No hay cambios"
           git push origin main
